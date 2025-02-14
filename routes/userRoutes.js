@@ -11,8 +11,8 @@ const storage = multer.memoryStorage();
 const upload = multer({ storage });
 
 // User routes
-router.post("/signup", userController.signup);
-router.post("/login", userController.login);
+router.post("/auth/signup", userController.signup);
+router.post("/auth/login", userController.login);
 router.put(
   "/update-profile-picture",
   verifyToken,
@@ -23,7 +23,7 @@ router.put("/update-password", verifyToken, userController.updatePassword);
 router.get("/friends", verifyToken, userController.getFriends);
 router.post("/add-friend", verifyToken, userController.addFriend);
 router.post("/remove-friend", verifyToken, userController.removeFriend);
-
+router.get("/users", verifyToken, userController.getUsers);
 // Chat routes
 router.get("/messages/:friendId", verifyToken, chatController.getMessages);
 router.post("/messages", verifyToken, chatController.sendMessage);

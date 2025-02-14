@@ -6,18 +6,34 @@ const Friend = require("../models/Friend");
 exports.getMessages = async (req, res) => {
   try {
     const { friendId } = req.params;
-    if (!friendId)
+    if (!friendId) {
       return res.status(400).json({ message: "Friend ID is required" });
+    }
+
+    console.log(
+      "Fetching messages for user:",
+      req.userId,
+      "and friend:",
+      friendId
+    );
+
+    // Ensure `req.userId` is valid
+    if (!req.userId) {
+      return res.status(401).json({ message: "Unauthorized: User ID missing" });
+    }
 
     const messages = await Message.find({
       $or: [
-        { senderId: req.userId, receiverId: friendId },
-        { senderId: friendId, receiverId: req.userId },
+        { senderId: req.userId, recipientId: friendId }, // Ensure correct field names
+        { senderId: friendId, recipientId: req.userId },
       ],
     }).sort({ createdAt: 1 });
 
+    console.log("Fetched messages:", messages);
+
     res.status(200).json(messages);
   } catch (error) {
+    console.error("Error fetching messages:", error);
     res.status(500).json({ message: error.message });
   }
 };

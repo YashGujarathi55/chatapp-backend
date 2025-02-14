@@ -6,20 +6,28 @@ const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
 const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
 const dotenv = require("dotenv");
-
+const AWS = require("aws-sdk");
+const { Types } = require("mongoose");
+const mongoose = require("mongoose");
 dotenv.config();
-
-const s3 = new S3Client({
-  region: "me-central-1",
-  credentials: {
-    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-  },
+const ObjectID = Types.ObjectId;
+const s3 = new AWS.S3({
+  accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+  secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+  region: process.env.S3_REGION,
 });
+async function testHash() {
+  let password = "yash5555";
+  const hashedPassword = await bcrypt.hash(password, 10);
+  const enteredPassword = "yash5555";
+  const storedHash =
+    "$2b$10$pzVoq0NA1UeG7HEqT0tz7.Y56qIX1ZShENiu18muVDO0I8YuZfbua";
 
-const BUCKET_NAME = "profound-storage";
+  const isMatch = await bcrypt.compare(enteredPassword, storedHash);
+  console.log("Password Match Test:", isMatch);
+  console.log("hashedPassword :>> ", hashedPassword);
+}
 
-// User Signup
 exports.signup = async (req, res) => {
   try {
     const { name, email, password } = req.body;
@@ -30,7 +38,16 @@ exports.signup = async (req, res) => {
     const hashedPassword = await bcrypt.hash(password, 10);
     const user = new User({ name, email, password: hashedPassword });
     await user.save();
-    res.status(201).json({ message: "User created successfully" });
+
+    // Generate token
+    const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, {
+      expiresIn: "7d",
+    });
+
+    // Save token in DB
+    await new Token({ userId: user._id, token }).save();
+
+    res.status(201).json({ token, user });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -43,14 +60,25 @@ exports.login = async (req, res) => {
     const user = await User.findOne({ email });
     if (!user) return res.status(404).json({ message: "User not found" });
 
+    console.log("User found:", user); // Debugging
+    console.log("Entered Password:", password);
+    console.log("Stored Hashed Password:", user.password);
+    testHash();
+
     const isMatch = await bcrypt.compare(password, user.password);
+    console.log("Password Match:", isMatch);
+
     if (!isMatch)
       return res.status(400).json({ message: "Invalid credentials" });
 
     const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, {
       expiresIn: "7d",
     });
+
+    // Remove old tokens before saving a new one
+    await Token.deleteMany({ userId: user._id });
     await new Token({ userId: user._id, token }).save();
+
     res.status(200).json({ token, user });
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -66,7 +94,7 @@ exports.updateProfilePicture = async (req, res) => {
     const key = `profile-pictures/${Date.now()}-${file.originalname}`;
 
     const command = new PutObjectCommand({
-      Bucket: BUCKET_NAME,
+      Bucket: process.env.S3_BUCKET_NAME,
       Key: key,
       Body: file.buffer,
       ContentType: file.mimetype,
@@ -75,15 +103,13 @@ exports.updateProfilePicture = async (req, res) => {
     await s3.send(command);
 
     const user = await User.findById(req.userId);
-    user.profilePicture = `https://${BUCKET_NAME}.s3.me-central-1.amazonaws.com/${key}`;
+    // user.profilePicture = `https://${BUCKET_NAME}.s3.me-central-1.amazonaws.com/${key}`;
     await user.save();
 
-    res
-      .status(200)
-      .json({
-        message: "Profile picture updated successfully",
-        profilePicture: user.profilePicture,
-      });
+    res.status(200).json({
+      message: "Profile picture updated successfully",
+      profilePicture: `/${key}`,
+    });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -125,16 +151,24 @@ exports.removeFriend = async (req, res) => {
 // Get Friends List
 exports.getFriends = async (req, res) => {
   try {
-    const friends = await Friend.find({ userId: req.userId }).populate(
-      "friendId",
-      "name profilePicture"
-    );
-    res.status(200).json(friends);
+    const friends = await Friend.find({ userId: req.userId })
+      .populate("friendId", "name profilePicture")
+      .lean(); // Convert Mongoose docs to plain objects
+
+    // Filter out any null friendId values
+    const friendList = friends
+      .filter((f) => f.friendId) // Ensure friendId is not null
+      .map((f) => ({
+        _id: f.friendId._id,
+        name: f.friendId.name,
+        profilePicture: f.friendId.profilePicture,
+      }));
+
+    res.status(200).json(friendList);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
 };
-
 // Update Password
 exports.updatePassword = async (req, res) => {
   try {
@@ -151,6 +185,65 @@ exports.updatePassword = async (req, res) => {
 
     res.status(200).json({ message: "Password updated successfully" });
   } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// Get Users List
+
+exports.getUsers = async (req, res) => {
+  try {
+    const userId = req.userId;
+    if (!mongoose.Types.ObjectId.isValid(userId)) {
+      return res.status(400).json({ message: "Invalid user ID" });
+    }
+    const objectIdUserId = new mongoose.Types.ObjectId(userId); // Convert properly
+
+    // console.log("req.userId :>> ", objectIdUserId);
+
+    // Find all friends where userId is the current user
+    const friends = await Friend.find({ userId: objectIdUserId }).select(
+      "friendId"
+    );
+
+    // Extract only friend IDs into an array
+    const friendIds = friends.map(
+      (friend) => new mongoose.Types.ObjectId(friend.friendId)
+    );
+    const matchFilter = {
+      _id: { $ne: objectIdUserId }, // Exclude yourself
+    };
+
+    // Add friends to exclusion if they exist
+    if (friendIds.length > 0) {
+      matchFilter._id.$nin = friendIds.map(
+        (id) => new mongoose.Types.ObjectId(id)
+      );
+    }
+    const pipeline = [
+      {
+        $match: matchFilter,
+      },
+    ];
+
+    // Apply search filter if query exists
+    if (req.query.search) {
+      pipeline.push({
+        $match: { name: { $regex: req.query.search, $options: "i" } },
+      });
+    }
+
+    pipeline.push(
+      { $project: { name: 1, profilePicture: 1 } }, // Select only required fields
+      { $limit: 10 },
+      { $skip: 0 }
+    );
+
+    // console.log("Pipeline :>> ", JSON.stringify(pipeline));
+    const users = await User.aggregate(pipeline);
+    res.status(200).json(users);
+  } catch (error) {
+    console.error("Error fetching users:", error);
     res.status(500).json({ message: error.message });
   }
 };

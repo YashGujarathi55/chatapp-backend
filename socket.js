@@ -14,8 +14,14 @@ const initSocket = (server) => {
   });
 
   io.use((socket, next) => {
+    console.log(
+      "Incoming socket connection with token:",
+      socket.handshake.query.token
+    ); // Debug
     const token = socket.handshake.query.token;
+
     if (!token) {
+      console.log("Authentication failed: No token provided.");
       return next(new Error("Authentication error"));
     }
 
@@ -28,10 +34,10 @@ const initSocket = (server) => {
     });
   });
 
-  io.on("connection", (socket) => {
+  io.on("connection", async (socket) => {
     console.log(`User connected: ${socket.userId}`);
     onlineUsers[socket.userId] = socket.id;
-
+    await User.findByIdAndUpdate(socket.userId, { online: true });
     // Emit online status to friends
     socket.broadcast.emit("userOnline", { userId: socket.userId });
 
@@ -53,7 +59,7 @@ const initSocket = (server) => {
       await message.save();
 
       const roomId = [socket.userId, recipientId].sort().join("-");
-      io.to(roomId).emit("newMessage", message);
+      socket.broadcast.to(roomId).emit("newMessage", message);
 
       // Notify the recipient if offline
       if (!onlineUsers[recipientId]) {
@@ -74,17 +80,18 @@ const initSocket = (server) => {
       await message.save();
 
       const roomId = [socket.userId, recipientId].sort().join("-");
-      io.to(roomId).emit("newMediaMessage", message);
-
+      // io.to(roomId).emit("newMediaMessage", message);
+      socket.broadcast.to(roomId).emit("newMediaMessage", message);
       if (!onlineUsers[recipientId]) {
         console.log(`User ${recipientId} is offline. Media message saved.`);
       }
     });
 
     // Handle disconnect
-    socket.on("disconnect", () => {
+    socket.on("disconnect", async () => {
       console.log(`User disconnected: ${socket.userId}`);
       delete onlineUsers[socket.userId];
+      await User.findByIdAndUpdate(socket.userId, { online: false });
       socket.broadcast.emit("userOffline", { userId: socket.userId });
     });
   });
